@@ -1,0 +1,12 @@
+services:
+  clash-pool:
+    build: .
+    command: [""]
+    ports:
+      - "3000:3000"
+      - "52000-53000:52000-53000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TEST_URL=http://www.gstatic.com/generate_204 # 可自定义测速地址
+    restart: unless-stopped

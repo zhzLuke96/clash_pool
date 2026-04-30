@@ -1,0 +1,316 @@
+import yaml from "js-yaml";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn, ChildProcess } from "node:child_process";
+import http from "node:http";
+import { ProxyAgent, fetch } from "undici";
+
+const BASE_PORT = 52000;
+const API_PORT = 9090;
+const SERVER_PORT = 3000;
+const PERSIST_DIR = "data";
+const PERSIST_FILE = `${PERSIST_DIR}/runtime_config.yaml`;
+const IP_CACHE_FILE = `${PERSIST_DIR}/ip_info.json`;
+const CONFIG_PATH = path.resolve("config.yml");
+
+// 支持环境变量配置测速 URL，默认使用 generate_204
+const TEST_URL = process.env.TEST_URL || "http://www.gstatic.com/generate_204";
+
+let mihomoProcess: ChildProcess | null = null;
+let currentProxies: any[] = [];
+let liveStatus: Record<string, any> = {};
+let ipDetails: Record<string, any> = {};
+let mihomoLogs: string[] = [];
+const MAX_LOGS = 1000;
+
+const pingingIps = new Set<string>(); // 防止重复并发请求同一个 IP
+
+// 启动时加载 IP 缓存
+if (fs.existsSync(IP_CACHE_FILE)) {
+  try {
+    ipDetails = JSON.parse(fs.readFileSync(IP_CACHE_FILE, "utf-8"));
+  } catch {}
+}
+
+function saveIpCache() {
+  fs.mkdirSync(PERSIST_DIR, { recursive: true });
+  fs.writeFileSync(IP_CACHE_FILE, JSON.stringify(ipDetails, null, 2));
+}
+
+function startMihomo() {
+  mihomoLogs.push(`\n--- [${new Date().toISOString()}] Mihomo Started ---\n`);
+  mihomoProcess = spawn("mihomo", ["-f", CONFIG_PATH]);
+  const logHandler = (data: Buffer) => {
+    const str = data.toString();
+    process.stdout.write(str);
+    mihomoLogs.push(str);
+    if (mihomoLogs.length > MAX_LOGS) mihomoLogs.shift();
+  };
+  mihomoProcess.stdout?.on("data", logHandler);
+  mihomoProcess.stderr?.on("data", logHandler);
+  mihomoProcess.on("exit", () => {
+    mihomoProcess = null;
+    mihomoLogs.push(
+      `\n--- [${new Date().toISOString()}] Mihomo Process Exited ---\n`
+    );
+  });
+}
+
+async function reloadConfig(clashData: any) {
+  if (!clashData?.proxies?.length) throw new Error("配置中未找到 proxies 节点");
+
+  fs.mkdirSync(PERSIST_DIR, { recursive: true });
+  fs.writeFileSync(PERSIST_FILE, yaml.dump(clashData, { lineWidth: -1 }));
+
+  const proxyNames = clashData.proxies.map((p: any) => p.name);
+
+  const config = {
+    "allow-lan": true,
+    "external-controller": `0.0.0.0:${API_PORT}`,
+    dns: {
+      enable: true,
+      "enhanced-mode": "fake-ip",
+      "fake-ip-range": "198.18.0.1/16",
+      "default-nameserver": ["8.8.8.8", "114.114.114.114"],
+      nameserver: ["https://doh.pub/dns-query"],
+    },
+    // 增加 url-test 策略组，强制内核自动测速
+    "proxy-groups": [
+      {
+        name: "auto_test_all",
+        type: "url-test",
+        proxies: proxyNames,
+        url: TEST_URL,
+        interval: 300, // 5分钟测一次
+      },
+    ],
+    listeners: clashData.proxies.map((p: any, i: number) => ({
+      name: `mixed${i}`,
+      type: "mixed",
+      port: BASE_PORT + i,
+      proxy: p.name,
+    })),
+    proxies: clashData.proxies,
+  };
+
+  fs.writeFileSync("config.yml", yaml.dump(config, { lineWidth: -1 }));
+  currentProxies = clashData.proxies;
+  liveStatus = {}; // 重置状态
+
+  if (mihomoProcess) {
+    mihomoLogs.push(
+      `\n--- [${new Date().toISOString()}] Reloading Config via API ---\n`
+    );
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${API_PORT}/configs?force=true`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: CONFIG_PATH }),
+        }
+      );
+      if (!res.ok) throw new Error(await res.text());
+      console.log("✓ Mihomo 配置已热更新");
+    } catch (e) {
+      console.error("热更新失败，尝试强制重启:", e);
+      mihomoProcess.kill();
+      await new Promise((r) => setTimeout(r, 1000));
+      startMihomo();
+    }
+  } else {
+    startMihomo();
+  }
+}
+
+// 异步获取代理 IP 详情 (仅对有延迟的节点查一次)
+async function fetchIpDetails(proxiesToPing: any[]) {
+  const chunkSize = 5;
+  for (let i = 0; i < proxiesToPing.length; i += chunkSize) {
+    const chunk = proxiesToPing.slice(i, i + chunkSize);
+    await Promise.all(
+      chunk.map(async (p) => {
+        pingingIps.add(p.name);
+        const port = BASE_PORT + currentProxies.indexOf(p);
+        try {
+          const dispatcher = new ProxyAgent(`http://127.0.0.1:${port}`);
+          const res = await fetch("http://ip-api.com/json", {
+            dispatcher,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (res.ok) {
+            ipDetails[p.name] = await res.json();
+            saveIpCache(); // 每次成功都持久化
+          }
+        } catch {
+        } finally {
+          pingingIps.delete(p.name);
+        }
+      })
+    );
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+// 定时拉取状态并触发 IP 探测
+setInterval(async () => {
+  if (!mihomoProcess) return;
+  try {
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/proxies`);
+    const data = (await res.json()) as any;
+    liveStatus = data.proxies || {};
+
+    // 找出延迟大于 0 且尚未获取 IP 信息的节点
+    const needPing = currentProxies.filter((p) => {
+      const delay = liveStatus[p.name]?.history?.[0]?.delay || 0;
+      return delay > 0 && !ipDetails[p.name] && !pingingIps.has(p.name);
+    });
+
+    if (needPing.length > 0) {
+      fetchIpDetails(needPing); // 异步后台执行，不阻塞定时器
+    }
+  } catch {}
+}, 5000);
+
+// HTTP 服务与路由
+const server = http.createServer(async (req, res) => {
+  const sendJson = (data: any, status = 200) =>
+    res
+      .writeHead(status, { "Content-Type": "application/json" })
+      .end(JSON.stringify(data));
+  const sendText = (data: string, status = 200) =>
+    res
+      .writeHead(status, { "Content-Type": "text/plain; charset=utf-8" })
+      .end(data);
+
+  try {
+    if (req.url === "/status" && req.method === "GET") {
+      let alive = 0;
+      currentProxies.forEach((p) => {
+        if (liveStatus[p.name]?.history?.[0]?.delay > 0) alive++;
+      });
+      return sendJson({
+        total: currentProxies.length,
+        alive,
+        port_range: currentProxies.length
+          ? `${BASE_PORT}-${BASE_PORT + currentProxies.length - 1}`
+          : null,
+      });
+    }
+
+    if (req.url === "/logs" && req.method === "GET") {
+      return sendText(mihomoLogs.join(""));
+    }
+
+    if (req.url?.startsWith("/proxies") && req.method === "GET") {
+      const urlObj = new URL(req.url, `http://localhost`);
+      const search = urlObj.searchParams.get("search") || "";
+      const matchType = urlObj.searchParams.get("match") || "fuzzy";
+      const page = parseInt(urlObj.searchParams.get("page") || "1");
+      const limit = parseInt(urlObj.searchParams.get("limit") || "20");
+      const aliveOnly = urlObj.searchParams.get("alive") === "true"; // 过滤仅可用
+
+      let filtered = currentProxies;
+      if (search) {
+        filtered = filtered.filter((p) => {
+          const ip = ipDetails[p.name] || {};
+          const searchTarget = [
+            p.name,
+            p.type,
+            ip.country,
+            ip.city,
+            ip.isp,
+            ip.org,
+            ip.query,
+            ip.as,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          if (matchType === "regex") {
+            try {
+              return new RegExp(search, "i").test(searchTarget);
+            } catch {
+              return false;
+            }
+          }
+          return searchTarget.includes(search.toLowerCase());
+        });
+      }
+
+      if (aliveOnly) {
+        filtered = filtered.filter(
+          (p) => (liveStatus[p.name]?.history?.[0]?.delay || 0) > 0
+        );
+      }
+
+      const total = filtered.length;
+      const start = (page - 1) * limit;
+      const data = filtered.slice(start, start + limit).map((p) => {
+        const status = liveStatus[p.name];
+        const delay = status?.history?.[0]?.delay || 0;
+        return {
+          name: p.name,
+          port: BASE_PORT + currentProxies.indexOf(p),
+          type: p.type,
+          delay,
+          alive: delay > 0,
+          ipInfo: ipDetails[p.name] || null,
+        };
+      });
+      return sendJson({ total, page, limit, data });
+    }
+
+    if (req.url === "/config" && req.method === "POST") {
+      const body = await new Promise<string>((r) => {
+        let d = "";
+        req.on("data", (c) => (d += c));
+        req.on("end", () => r(d));
+      });
+      const clashData = body.trim().startsWith("{")
+        ? JSON.parse(body)
+        : yaml.load(body);
+      await reloadConfig(clashData);
+      return sendJson({
+        message: "配置已热更新，Mihomo 正在测速，可用节点将自动探测 IP",
+        count: currentProxies.length,
+      });
+    }
+
+    res.writeHead(404).end("Not Found");
+  } catch (e: any) {
+    sendJson({ error: e.message }, 500);
+  }
+});
+
+// 启动入口
+(async () => {
+  server.listen(SERVER_PORT, () =>
+    console.log(`✓ 管理 API 运行在: http://localhost:${SERVER_PORT}`)
+  );
+
+  const arg = process.argv[2];
+  if (arg) {
+    try {
+      let rawData;
+      if (arg.startsWith("http")) rawData = await (await fetch(arg)).text();
+      else if (arg.startsWith("file:") || fs.existsSync(arg))
+        rawData = fs.readFileSync(arg.replace("file:", ""), "utf-8");
+      else throw new Error("无效参数");
+      await reloadConfig(yaml.load(rawData) as any);
+    } catch (e: any) {
+      console.error("初始化配置失败:", e.message);
+    }
+  } else if (fs.existsSync(PERSIST_FILE)) {
+    console.log("✓ 发现已持久化的配置，正在自动加载...");
+    try {
+      await reloadConfig(
+        yaml.load(fs.readFileSync(PERSIST_FILE, "utf-8")) as any
+      );
+    } catch (e: any) {
+      console.error("加载持久化配置失败:", e.message);
+    }
+  } else {
+    console.log("✓ 空载启动，请通过 POST /config 提交配置");
+  }
+})();
