@@ -65,14 +65,27 @@ export interface ConfigUpdateResponse {
 // ==================== 客户端类 ====================
 
 export class ClashPoolClient {
-  private baseUrl: string;
+  private apiUrl: string;
+  private proxyHost: string;
 
   /**
    * 初始化客户端
-   * @param baseUrl clash_pool 服务端地址，默认 http://localhost:3000
+   * @param apiUrl clash_pool 管理 API 地址，例如 http://your-server-ip:3000
+   * @param proxyHost 代理服务的宿主机 IP/域名，用于生成代理地址。如果不传，将尝试从 apiUrl 中提取 hostname
    */
-  constructor(baseUrl: string = "http://localhost:3000") {
-    this.baseUrl = baseUrl.replace(/\/+$/, ""); // 移除末尾斜杠
+  constructor(apiUrl: string = "http://localhost:3000", proxyHost?: string) {
+    this.apiUrl = apiUrl.replace(/\/+$/, ""); // 移除末尾斜杠
+
+    if (proxyHost) {
+      this.proxyHost = proxyHost;
+    } else {
+      // 尝试从 apiUrl 中提取主机地址
+      try {
+        this.proxyHost = new URL(this.apiUrl).hostname;
+      } catch {
+        this.proxyHost = "127.0.0.1"; // 兜底
+      }
+    }
   }
 
   /**
@@ -87,7 +100,7 @@ export class ClashPoolClient {
    * @returns 纯文本日志内容
    */
   async getLogs(): Promise<string> {
-    const res = await fetch(`${this.baseUrl}/logs`);
+    const res = await fetch(`${this.apiUrl}/logs`);
     if (!res.ok) throw new Error(`请求失败: ${res.status} ${res.statusText}`);
     return res.text();
   }
@@ -124,21 +137,33 @@ export class ClashPoolClient {
   }
 
   /**
-   * 获取第一个可用节点的代理地址 (快捷方法)
-   * @returns http 代理地址，例如 http://127.0.0.1:52001，无可用节点时返回 null
+   * 根据节点端口生成代理地址
+   * @param port 节点端口
+   * @param protocol 协议类型: 'http' 或 'socks5'，默认 'http'
    */
-  async getFirstAliveProxy(): Promise<string | null> {
+  getProxyUrl(port: number, protocol: "http" | "socks5" = "http"): string {
+    return `${protocol}://${this.proxyHost}:${port}`;
+  }
+
+  /**
+   * 获取第一个可用节点的代理地址 (快捷方法)
+   * @param protocol 协议类型: 'http' 或 'socks5'，默认 'http'
+   * @returns 代理地址，例如 http://1.2.3.4:52001，无可用节点时返回 null
+   */
+  async getFirstAliveProxy(
+    protocol: "http" | "socks5" = "http"
+  ): Promise<string | null> {
     const res = await this.getProxies({ alive: true, limit: 1 });
     if (res.data.length > 0) {
       const node = res.data[0];
-      return `http://127.0.0.1:${node.port}`;
+      return this.getProxyUrl(node.port, protocol);
     }
     return null;
   }
 
   // 内部请求封装
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, options);
+    const res = await fetch(`${this.apiUrl}${path}`, options);
     if (!res.ok) {
       let errorMsg = `请求失败: ${res.status} ${res.statusText}`;
       try {

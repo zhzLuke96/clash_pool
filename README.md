@@ -159,43 +159,44 @@ curl --proxy http://127.0.0.1:52001 https://ipinfo.io/ip
 import { ClashPoolClient } from "./client";
 
 // 1. 初始化客户端
-const client = new ClashPoolClient("http://localhost:3000");
+// 远程部署场景：API 在 3000 端口，代理池在 52000+ 端口，都在 1.2.3.4 这台服务器上
+const client = new ClashPoolClient("http://1.2.3.4:3000", "1.2.3.4");
+
+// 本地开发场景：不传第二个参数，默认从 API 地址中提取，或回退到 127.0.0.1
+// const localClient = new ClashPoolClient('http://localhost:3000');
 
 async function main() {
-  // 2. 查看系统状态
-  const status = await client.getStatus();
-  console.log(`系统共有 ${status.total} 个节点，可用: ${status.alive}`);
+  // 2. 快捷获取一个可用的 HTTP 代理
+  const httpProxy = await client.getFirstAliveProxy("http");
+  console.log(`自动选取 HTTP 代理: ${httpProxy}`);
+  // 输出: 自动选取 HTTP 代理: http://1.2.3.4:52001
 
-  // 3. 搜索日本地区可用节点
-  const jpNodes = await client.getProxies({
-    search: "Japan",
-    alive: true,
-    limit: 5,
-  });
-  console.log("日本可用节点:", jpNodes.data);
+  // 3. 快捷获取一个可用的 SOCKS5 代理
+  const socks5Proxy = await client.getFirstAliveProxy("socks5");
+  console.log(`自动选取 SOCKS5 代理: ${socks5Proxy}`);
+  // 输出: 自动选取 SOCKS5 代理: socks5://1.2.3.4:52001
 
-  // 4. 快捷获取一个可用代理
-  const proxyUrl = await client.getFirstAliveProxy();
-  if (proxyUrl) {
-    console.log(`自动选取代理: ${proxyUrl}`);
-    // 可以直接给 axios 或 fetch 使用
-    // axios.get('https://example.com', { proxy: { host: '127.0.0.1', port: 52001 } })
+  // 4. 在 axios 或 node-fetch 等库中使用
+  if (httpProxy) {
+    /*
+    // axios 示例
+    const axios = require('axios');
+    const res = await axios.get('https://ipinfo.io/ip', {
+      proxy: {
+        host: client.proxyHost, // 1.2.3.4
+        port: 52001
+      }
+    });
+    */
   }
 
-  // 5. 动态提交配置 (YAML 或 JSON)
-  const yamlStr = `
-proxies:
-  - name: test-node
-    type: http
-    server: 1.1.1.1
-    port: 80
-  `;
-  const result = await client.updateConfig(yamlStr);
-  console.log(`配置更新结果: ${result.message}, 节点数: ${result.count}`);
-
-  // 6. 获取运行日志
-  const logs = await client.getLogs();
-  console.log("最新日志片段:", logs.slice(-200));
+  // 5. 搜索指定地区的节点，并获取其代理地址
+  const jpNodes = await client.getProxies({ search: "Japan", alive: true });
+  if (jpNodes.data.length > 0) {
+    const jpNode = jpNodes.data[0];
+    console.log(`日本节点代理地址: ${client.getProxyUrl(jpNode.port, "http")}`);
+    // 输出: 日本节点代理地址: http://1.2.3.4:52005
+  }
 }
 
 main().catch(console.error);
