@@ -132,7 +132,7 @@ async function reloadConfig(clashData: any) {
         type: "url-test",
         proxies: proxyNames,
         url: TEST_URL,
-        interval: 300, // 5分钟测一次
+        interval: 600 * 3, // 这个自动测速好像有问题，我们手动发起测速
       },
     ],
     listeners: clashData.proxies.map((p: any, i: number) => ({
@@ -386,4 +386,9 @@ const server = http.createServer(async (req, res) => {
   } else {
     console.log("✓ 空载启动，请通过 POST /config 提交配置");
   }
+  // 5分钟一次测速
+  // 内核不知道为什么好像不会自动测...我直接把内核测速改成一小时，然后我们手动触发
+  setInterval(async () => {
+    await triggerGroupDelayTest();
+  }, 5 * 60 * 1000);
 })();
