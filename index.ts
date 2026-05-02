@@ -16,6 +16,9 @@ const CONFIG_PATH = path.resolve("config.yml");
 // 支持环境变量配置测速 URL，默认使用 generate_204
 const TEST_URL = process.env.TEST_URL || "http://www.gstatic.com/generate_204";
 
+// 固定的策略组名称（由程序自动生成）
+const AUTO_TEST_GROUP = "auto_test_all";
+
 let mihomoProcess: ChildProcess | null = null;
 let currentProxies: any[] = [];
 let liveStatus: Record<string, any> = {};
@@ -35,6 +38,54 @@ if (fs.existsSync(IP_CACHE_FILE)) {
 function saveIpCache() {
   fs.mkdirSync(PERSIST_DIR, { recursive: true });
   fs.writeFileSync(IP_CACHE_FILE, JSON.stringify(ipDetails, null, 2));
+}
+
+// 等待 Mihomo API 就绪
+async function waitForMihomoAPI(
+  retries = 30,
+  delayMs = 1000
+): Promise<boolean> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${API_PORT}/version`);
+      if (res.ok) return true;
+    } catch {}
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return false;
+}
+
+// 主动触发策略组延迟测试
+async function triggerGroupDelayTest() {
+  if (!mihomoProcess) {
+    console.warn("⚠️ Mihomo 未运行，无法触发策略组测速");
+    return;
+  }
+  const url = encodeURIComponent(TEST_URL);
+  const timeout = 5000;
+  const groupUrl = `http://127.0.0.1:${API_PORT}/group/${AUTO_TEST_GROUP}/delay?url=${url}&timeout=${timeout}`;
+  try {
+    const res = await fetch(groupUrl, {
+      method: "GET",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      const result = await res.json();
+      console.log(
+        `✅ 已触发策略组 ${AUTO_TEST_GROUP} 延迟测试，内核将更新所有节点延迟`
+      );
+      mihomoLogs.push(
+        `[Trigger] Group delay test invoked at ${new Date().toISOString()}\n`
+      );
+    } else {
+      const errText = await res.text();
+      console.warn(`⚠️ 触发策略组测速失败 (${res.status}): ${errText}`);
+      mihomoLogs.push(`[Warn] Group delay test failed: ${errText}\n`);
+    }
+  } catch (e: any) {
+    console.error(`❌ 调用策略组测速接口异常: ${e.message}`);
+    mihomoLogs.push(`[Error] Group delay test exception: ${e.message}\n`);
+  }
 }
 
 function startMihomo() {
@@ -77,7 +128,7 @@ async function reloadConfig(clashData: any) {
     // 增加 url-test 策略组，强制内核自动测速
     "proxy-groups": [
       {
-        name: "auto_test_all",
+        name: AUTO_TEST_GROUP,
         type: "url-test",
         proxies: proxyNames,
         url: TEST_URL,
@@ -97,6 +148,9 @@ async function reloadConfig(clashData: any) {
   currentProxies = clashData.proxies;
   liveStatus = {}; // 重置状态
 
+  // 记录是否是新启动的进程（用于决定是否需要等待AP就绪）
+  let isNewProcess = false;
+
   if (mihomoProcess) {
     mihomoLogs.push(
       `\n--- [${new Date().toISOString()}] Reloading Config via API ---\n`
@@ -112,14 +166,33 @@ async function reloadConfig(clashData: any) {
       );
       if (!res.ok) throw new Error(await res.text());
       console.log("✓ Mihomo 配置已热更新");
+      // 热更新成功后立即触发策略组测速（API已就绪）
+      await triggerGroupDelayTest();
     } catch (e) {
       console.error("热更新失败，尝试强制重启:", e);
       mihomoProcess.kill();
       await new Promise((r) => setTimeout(r, 1000));
       startMihomo();
+      isNewProcess = true;
     }
   } else {
     startMihomo();
+    isNewProcess = true;
+  }
+
+  // 如果是新启动的进程，需要等待API就绪后再触发测速
+  if (isNewProcess) {
+    console.log("⏳ 等待 Mihomo API 就绪...");
+    const ready = await waitForMihomoAPI();
+    if (ready) {
+      console.log("✓ Mihomo API 已就绪，触发策略组测速");
+      await triggerGroupDelayTest();
+    } else {
+      console.warn("⚠️ 等待 Mihomo API 超时，跳过主动测速");
+      mihomoLogs.push(
+        "[Warn] Timeout waiting for Mihomo API, skip group delay test\n"
+      );
+    }
   }
 }
 
