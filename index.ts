@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, ChildProcess } from "node:child_process";
 import http from "node:http";
 import { ProxyAgent, fetch } from "undici";
+import lodash from "lodash-es";
 
 const BASE_PORT = 52000;
 const API_PORT = 9090;
@@ -282,12 +283,17 @@ const server = http.createServer(async (req, res) => {
       const page = parseInt(urlObj.searchParams.get("page") || "1");
       const limit = parseInt(urlObj.searchParams.get("limit") || "20");
       const aliveOnly = urlObj.searchParams.get("alive") === "true"; // 过滤仅可用
+      const keyPath = urlObj.searchParams.get("key_path"); // 使用哪个值来搜索
 
       let filtered = currentProxies;
       if (search) {
         filtered = filtered.filter((p) => {
           const ip = ipDetails[p.name] || {};
-          const searchTarget = [
+          const obj = {
+            ...p,
+            ip,
+          };
+          let searchTarget = [
             p.name,
             p.type,
             ip.country,
@@ -300,6 +306,9 @@ const server = http.createServer(async (req, res) => {
             .filter(Boolean)
             .join(" ")
             .toLowerCase();
+          if (keyPath) {
+            searchTarget = lodash.get(obj, keyPath) || p.name;
+          }
           if (matchType === "regex") {
             try {
               return new RegExp(search, "i").test(searchTarget);
