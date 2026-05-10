@@ -6,13 +6,21 @@ import http from "node:http";
 import { ProxyAgent, fetch } from "undici";
 import lodash from "lodash-es";
 
+// fake-ip 配置
+import DNS_CONFIG from "./dns.config.json";
+
 const BASE_PORT = 52000;
 const API_PORT = 9090;
 const SERVER_PORT = 3000;
 const PERSIST_DIR = "data";
 const PERSIST_FILE = `${PERSIST_DIR}/runtime_config.yaml`;
 const IP_CACHE_FILE = `${PERSIST_DIR}/ip_info.json`;
-const CONFIG_PATH = path.resolve("config.yml");
+const CONFIG_PATH = path.join(
+  process.env.HOME || "/root",
+  `.config/mihomo/config.yaml`
+);
+
+fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
 
 // 支持环境变量配置测速 URL，默认使用 generate_204
 const TEST_URL = process.env.TEST_URL || "http://www.gstatic.com/generate_204";
@@ -72,6 +80,7 @@ async function triggerGroupDelayTest() {
     });
     if (res.ok) {
       const result = await res.json();
+      // console.log(result);
       console.log(
         `✅ 已触发策略组 ${AUTO_TEST_GROUP} 延迟测试，内核将更新所有节点延迟`
       );
@@ -119,13 +128,7 @@ async function reloadConfig(clashData: any) {
   const config = {
     "allow-lan": true,
     "external-controller": `0.0.0.0:${API_PORT}`,
-    dns: {
-      enable: true,
-      "enhanced-mode": "fake-ip",
-      "fake-ip-range": "198.18.0.1/16",
-      "default-nameserver": ["8.8.8.8", "114.114.114.114"],
-      nameserver: ["https://doh.pub/dns-query"],
-    },
+    dns: DNS_CONFIG.dns,
     // 增加 url-test 策略组，强制内核自动测速
     "proxy-groups": [
       {
@@ -145,7 +148,7 @@ async function reloadConfig(clashData: any) {
     proxies: clashData.proxies,
   };
 
-  fs.writeFileSync("config.yml", yaml.dump(config, { lineWidth: -1 }));
+  fs.writeFileSync(CONFIG_PATH, yaml.dump(config, { lineWidth: -1 }));
   currentProxies = clashData.proxies;
   liveStatus = {}; // 重置状态
 

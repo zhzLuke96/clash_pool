@@ -2,9 +2,10 @@ services:
   clash-pool:
     build: .
     command: [""]
-    ports:
-      - "3000:3000"
-      - "52000-53000:52000-53000"
+    network_mode: host
+    # ports:
+    #   - "3000:3000"
+    #   - "52000-53000:52000-53000"
     volumes:
       - ./data:/app/data
     environment:

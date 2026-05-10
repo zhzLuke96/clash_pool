@@ -14,6 +14,8 @@
 
 确保已安装 Docker 及 Docker Compose，然后运行：
 
+> 没有预先打包，启动包含打包过程可能略慢
+
 ```bash
 # 空载启动（等待通过 API 提交配置）
 docker compose up -d
