@@ -9,8 +9,9 @@ COPY pnpm-workspace.yaml .
 RUN npm install -g pnpm && pnpm install
 COPY dns.config.json .
 # COPY ./dist/index.js ./dist/index.js
+COPY ./index.ts ./index.ts
 # 暴露管理端口和代理端口
 EXPOSE 3000 52000-53000
 # 打包走这个
 # ENTRYPOINT ["node", "./dist/index.js"]
-ENTRYPOINT ["node", "tsx", "index.ts"]
+ENTRYPOINT ["npx", "tsx", "index.ts"]

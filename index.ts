@@ -370,7 +370,7 @@ const server = http.createServer(async (req, res) => {
 
 // 启动入口
 (async () => {
-  server.listen(SERVER_PORT, () =>
+  server.listen(SERVER_PORT, "0.0.0.0", () =>
     console.log(`✓ 管理 API 运行在: http://localhost:${SERVER_PORT}`)
   );
 
